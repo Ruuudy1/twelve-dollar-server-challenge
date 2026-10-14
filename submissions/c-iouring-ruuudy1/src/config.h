@@ -86,3 +86,9 @@
 
 // Stats line period in seconds when --stats is given.
 #define STATS_INTERVAL_S 10
+
+// HTTP parser group (http module).
+// Most header lines one request may carry; more is rejected.
+#define HTTP_HEADER_COUNT_MAX 100
+// Most CR bytes the head scan records: one per line plus the blank line.
+#define HTTP_CR_MAX (HTTP_HEADER_COUNT_MAX + 2)

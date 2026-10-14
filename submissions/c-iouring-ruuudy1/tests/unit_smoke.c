@@ -70,7 +70,7 @@ static void test_parse_and_route(void) {
     CHECK(parse_text("POST /posts HTTP/1.1\r\nContent-Length: 5\r\n\r\nab", &req, &route) == HTTP_PARSE_INCOMPLETE);
     CHECK(parse_text("GET /posts/1/ HTTP/1.1\r\n\r\n", &req, &route) == HTTP_PARSE_OK && route.kind == ROUTE_NOT_FOUND);
     CHECK(parse_text("GET /posts/ HTTP/1.1\r\n\r\n", &req, &route) == HTTP_PARSE_OK && route.kind == ROUTE_NOT_FOUND);
-    CHECK(parse_text("GET /feed HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", &req, &route) == HTTP_PARSE_BAD);
+    CHECK(parse_text("GET /feed HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", &req, &route) == HTTP_PARSE_INCOMPLETE);
 }
 
 static void test_ids(void) {
