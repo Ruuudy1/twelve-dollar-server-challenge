@@ -6,6 +6,7 @@ static void pass_add(uint32_t idx, const struct request *req);
 static void pass_add_bad_request(uint32_t idx);
 static void pass_hold_buf(int buf_id);
 static void pass_note_closing(uint32_t idx);
+static void pass_mark_dirty(uint32_t idx);
 // Defined in ring.c.
 static void ring_buf_return(int buf_id);
 
@@ -434,7 +435,7 @@ static void conn_request_close(uint32_t idx) {
 }
 
 // Queues an interim 100 Continue for a request whose headers arrived without its body.
-static void conn_queue_continue(struct conn *c) {
+static void conn_queue_continue(uint32_t idx, struct conn *c) {
     struct block *b = block_get();
     if (!b) {
         return;
@@ -445,6 +446,7 @@ static void conn_queue_continue(struct conn *c) {
     b->len = LIT_LEN(line);
     b->flags = BLOCK_F_NO_REWRITE;
     conn_queue(c, b);
+    pass_mark_dirty(idx);
     c->flags |= CONN_SENT_CONTINUE;
 }
 
@@ -487,8 +489,8 @@ static uint32_t conn_parse(uint32_t idx, struct conn *c, char *base, uint32_t st
         struct request req;
         enum http_parse_status st = http_parse(base + off, len - off, &req);
         if (st == HTTP_PARSE_INCOMPLETE) {
-            if (req.expect_continue && !(c->flags & CONN_SENT_CONTINUE)) {
-                conn_queue_continue(c);
+            if (req.expect_continue && !(c->flags & CONN_SENT_CONTINUE) && !c->pass_works && !c->out_head) {
+                conn_queue_continue(idx, c);
             }
             break;
         }

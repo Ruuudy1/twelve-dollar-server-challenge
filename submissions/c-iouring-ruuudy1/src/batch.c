@@ -118,7 +118,7 @@ struct pass {
     struct work work[PASS_MAX_REQUESTS + PASS_WORK_SLACK];
     uint16_t order[PASS_MAX_REQUESTS + PASS_WORK_SLACK];
     uint16_t bufs[PASS_MAX_REQUESTS + PASS_WORK_SLACK];
-    uint32_t dirty[PASS_MAX_REQUESTS + PASS_WORK_SLACK];
+    uint32_t dirty[PASS_CQE_MAX + PASS_MAX_REQUESTS + PASS_WORK_SLACK];
     uint32_t touched[PASS_CQE_MAX];
     uint32_t closing[PASS_CQE_MAX + PASS_MAX_REQUESTS + PASS_WORK_SLACK];
 };
@@ -232,6 +232,15 @@ static void pass_commit(void) {
     }
 }
 
+// Lists a connection for the send step once, however many blocks it gained.
+static void pass_mark_dirty(uint32_t idx) {
+    struct conn *c = conn_get(idx);
+    if (!(c->flags & CONN_DIRTY)) {
+        c->flags |= CONN_DIRTY;
+        pass.dirty[pass.n_dirty++] = idx;
+    }
+}
+
 // Appends the committed responses to their connections in arrival order, which fixes per-connection order.
 static void pass_publish(void) {
     for (uint32_t i = 0; i < pass.n_work; i++) {
@@ -243,10 +252,7 @@ static void pass_publish(void) {
             block_put(w->blk);
         } else {
             conn_queue(c, w->blk);
-            if (!(c->flags & CONN_DIRTY)) {
-                c->flags |= CONN_DIRTY;
-                pass.dirty[pass.n_dirty++] = w->idx;
-            }
+            pass_mark_dirty(w->idx);
         }
     }
 }
