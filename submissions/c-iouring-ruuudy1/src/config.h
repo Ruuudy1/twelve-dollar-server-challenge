@@ -86,3 +86,9 @@
 
 // Stats line period in seconds when --stats is given.
 #define STATS_INTERVAL_S 10
+
+// Database module: page cache region for SQLite, sized for DB_CACHE_SIZE (keep the two in step).
+#define DB_PAGE_BYTES 4096
+#define DB_PAGECACHE_KIB 131072
+// Slots beyond the cache_size page count, for pages SQLite holds outside the cache limit.
+#define DB_PAGECACHE_SLACK 64
