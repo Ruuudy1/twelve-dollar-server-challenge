@@ -30,17 +30,16 @@ void *realloc(void *p, size_t n) {
 
 static char bearer[1100];
 
-// Runs count requests built by make, each as its own pass, and returns the libc allocations they caused; the region
-// SQLite draws from must stay flat apart from a few blocks and must never fall back to libc.
+// Runs count requests built by make, each as its own pass, and returns the libc allocations they caused; SQLite's own
+// allocations come from the fixed memsys5 heap and never reach libc.
 static uint64_t measure(const char *label, unsigned count, bool (*make)(unsigned i, struct fx_req *rq, char *scratch)) {
     char scratch[128];
     struct fx_req rq;
     struct fx_resp *out = malloc(sizeof *out);
     uint64_t base_all = alloc_count;
-    uint64_t base_calls = db_mem.calls;
-    uint64_t base_libc = db_mem.libc_calls;
-    uint8_t *base_next = db_mem.next;
     uint64_t t0 = util_mono_ns();
+    struct timespec c0;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c0);
     for (unsigned i = 0; i < count; i++) {
         CHECK(make(i, &rq, scratch));
         alloc_counting = true;
@@ -55,15 +54,10 @@ static uint64_t measure(const char *label, unsigned count, bool (*make)(unsigned
     }
     uint64_t total = alloc_count - base_all;
     double us = (double)(util_mono_ns() - t0) / 1000.0 / count;
-    printf("%-10s %u requests: %llu libc allocations, %llu SQLite allocations from the region (%llu to libc, region grew %lld bytes), %.2f us each\n",
-           label, count, (unsigned long long)total, (unsigned long long)(db_mem.calls - base_calls),
-           (unsigned long long)(db_mem.libc_calls - base_libc), (long long)(db_mem.next - base_next), us);
-    CHECK(db_mem.libc_calls == base_libc);
-    if (count >= 10000) {
-        // A recycled block can still need one more of a size class the first time two are live at once; a leak would grow
-        // by the request count.
-        CHECK(db_mem.next - base_next <= 16384);
-    }
+    struct timespec c1;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+    double cpu = ((double)(c1.tv_sec - c0.tv_sec) * 1e9 + (double)(c1.tv_nsec - c0.tv_nsec)) / 1000.0 / count;
+    printf("%-10s %u requests: %llu libc allocations, %.2f us each, %.2f us cpu\n", label, count, (unsigned long long)total, us, cpu);
     free(out);
     return total;
 }
@@ -121,6 +115,7 @@ int main(void) {
     char token[1024];
     fx_tmpdir(dir, sizeof dir);
     snprintf(path, sizeof path, "%s/a.db", dir);
+    CHECK(sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 1) == SQLITE_OK);
     fx_seed(5);
     sqlite3 *db = fx_create(path);
     fx_user(db, 1, "alloc_user");
@@ -150,7 +145,9 @@ int main(void) {
     sqlite3_int64 overflow = 0;
     sqlite3_int64 high = 0;
     CHECK(sqlite3_status64(SQLITE_STATUS_PAGECACHE_OVERFLOW, &overflow, &high, 0) == SQLITE_OK);
-    printf("page cache overflow bytes %lld\n", (long long)overflow);
+    printf("page cache overflow bytes %lld, SQLite heap high-water %lld bytes of %d MB\n", (long long)overflow,
+           (long long)sqlite3_memory_highwater(0), DB_HEAP_MB);
+    CHECK(sqlite3_memory_highwater(0) < (sqlite3_int64)DB_HEAP_MB * 1048576 / 4);
     CHECK(overflow == 0);
     fx_server_close();
     fx_rmdir(dir);

@@ -96,5 +96,6 @@
 #define DB_PAGECACHE_KIB 131072
 // Slots beyond the cache_size page count, for pages SQLite holds outside the cache limit.
 #define DB_PAGECACHE_SLACK 64
-// Region reserved for SQLite own allocations; address space only until touched.
-#define DB_MEM_REGION_MB 64
+// Heap for SQLite own allocations (memsys5): high-water measured in the tests is under 0.2 MB, so 8 MB is a wide margin.
+#define DB_HEAP_MB 8
+#define DB_HEAP_MIN_ALLOC 32

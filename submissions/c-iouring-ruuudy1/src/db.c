@@ -125,142 +125,37 @@ static void db_reset(enum db_stmt id) {
     (void)sqlite3_reset(db_stmts[id]);
 }
 
-// SQLite's allocator: power-of-two size classes carved from one reserved region and recycled through free lists, so
-// the few small allocations SQLite still makes per request (strftime results for the column defaults) never reach libc.
-enum {
-    DB_MEM_MIN_SHIFT = 4,
-    DB_MEM_CLASSES = 28,
-    // Eight bytes in front of every block hold its class, or DB_MEM_LIBC and the size for a block from libc malloc.
-    DB_MEM_HEADER = 8,
-    DB_MEM_LIBC = 0xff,
-};
-
-struct db_mem {
-    uint8_t *next;
-    uint8_t *end;
-    void *free_list[DB_MEM_CLASSES];
-    uint64_t calls;
-    uint64_t libc_calls;
-};
-
-static struct db_mem db_mem;
-
-// Returns the size class (log2 of the block payload) for a request of n bytes, or DB_MEM_CLASSES when too large.
-static unsigned db_mem_class(size_t n) {
-    unsigned shift = DB_MEM_MIN_SHIFT;
-    while (shift < DB_MEM_CLASSES && ((size_t)1 << shift) < n) {
-        shift++;
-    }
-    return shift;
-}
-
-// Takes a block from libc when the region is exhausted or the request is huge; the header records the size.
-static void *db_mem_libc(size_t n) {
-    uint64_t *block = malloc(n + DB_MEM_HEADER);
-    db_mem.libc_calls++;
-    if (!block) {
+// Reserves len bytes aligned to 2 MB, asks for huge pages and touches every page now; NULL when mmap fails.
+static char *db_region(size_t len) {
+    static const size_t huge = (size_t)2 << 20;
+    size_t total = (len + huge - 1) & ~(huge - 1);
+    void *m = mmap(NULL, total + huge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) {
         return NULL;
     }
-    block[0] = ((uint64_t)n << 8) | DB_MEM_LIBC;
-    return block + 1;
-}
-
-// Allocates n bytes for SQLite from the free list of its class, or the region, or libc as a last resort.
-static void *db_mem_malloc(int n) {
-    unsigned shift = db_mem_class((size_t)n);
-    uint64_t *block = NULL;
-    db_mem.calls++;
-    if (shift >= DB_MEM_CLASSES) {
-        return db_mem_libc((size_t)n);
+    char *base = (char *)m + ((huge - (uintptr_t)m % huge) % huge);
+    if (madvise(base, total, MADV_HUGEPAGE)) {
+        util_log_limited(0, "warning: no transparent huge pages for a SQLite region");
     }
-    if (db_mem.free_list[shift]) {
-        block = (uint64_t *)db_mem.free_list[shift] - 1;
-        db_mem.free_list[shift] = *(void **)(block + 1);
-    } else if ((size_t)(db_mem.end - db_mem.next) >= DB_MEM_HEADER + ((size_t)1 << shift)) {
-        block = (uint64_t *)db_mem.next;
-        db_mem.next += DB_MEM_HEADER + ((size_t)1 << shift);
-    } else {
-        return db_mem_libc((size_t)n);
-    }
-    block[0] = shift;
-    return block + 1;
+    memset(base, 0, total);
+    return base;
 }
 
-// Returns a block to its free list, or to libc when it came from there.
-static void db_mem_free(void *p) {
-    if (!p) {
-        return;
-    }
-    uint64_t *block = (uint64_t *)p - 1;
-    if ((block[0] & 0xff) == DB_MEM_LIBC) {
-        free(block);
-        return;
-    }
-    *(void **)p = db_mem.free_list[block[0]];
-    db_mem.free_list[block[0]] = p;
-}
-
-// Reports the usable size of a block.
-static int db_mem_size(void *p) {
-    uint64_t head = ((uint64_t *)p)[-1];
-    return (head & 0xff) == DB_MEM_LIBC ? (int)(head >> 8) : (int)((size_t)1 << head);
-}
-
-// Grows or shrinks a block; a block that already has room stays where it is.
-static void *db_mem_realloc(void *p, int n) {
-    int have = p ? db_mem_size(p) : 0;
-    void *grown = NULL;
-    if (p && n <= have) {
-        return p;
-    }
-    grown = db_mem_malloc(n);
-    if (grown && p) {
-        memcpy(grown, p, (size_t)have);
-        db_mem_free(p);
-    }
-    return grown;
-}
-
-// Rounds a request up to the size the allocator would hand out.
-static int db_mem_roundup(int n) {
-    unsigned shift = db_mem_class((size_t)n);
-    return shift >= DB_MEM_CLASSES ? (n + 7) & ~7 : (int)((size_t)1 << shift);
-}
-
-// Nothing to set up or tear down: the region is reserved before SQLite is configured.
-static int db_mem_init(void *arg) {
-    (void)arg;
-    return SQLITE_OK;
-}
-
-static void db_mem_shutdown(void *arg) {
-    (void)arg;
-}
-
-// Installs the allocator before sqlite3_initialize; without the region SQLite keeps its default allocator.
-static void db_mem_config(void) {
-    static const sqlite3_mem_methods methods = {db_mem_malloc, db_mem_free, db_mem_realloc, db_mem_size,
-                                                db_mem_roundup, db_mem_init, db_mem_shutdown, NULL};
+// Hands SQLite's own allocations to its built-in memsys5 allocator over one fixed region, so none reaches libc malloc.
+static void db_heap_config(void) {
     static bool configured;
-    size_t len = (size_t)DB_MEM_REGION_MB << 20;
     if (configured) {
         return;
     }
     configured = true;
-    void *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (m == MAP_FAILED) {
-        return;
-    }
-    db_mem.next = m;
-    db_mem.end = (uint8_t *)m + len;
-    if (sqlite3_config(SQLITE_CONFIG_MALLOC, &methods) != SQLITE_OK) {
-        util_log_limited(0, "warning: SQLite allocator rejected");
+    char *base = db_region((size_t)DB_HEAP_MB << 20);
+    if (base && sqlite3_config(SQLITE_CONFIG_HEAP, base, DB_HEAP_MB << 20, DB_HEAP_MIN_ALLOC) != SQLITE_OK) {
+        util_log_limited(0, "warning: SQLite heap region rejected");
     }
 }
 
 // Gives SQLite one region of huge pages for the page cache so a cache hit never reaches malloc.
 static void db_pagecache_config(void) {
-    static const size_t huge = (size_t)2 << 20;
     static bool configured;
     int hdr = 0;
     if (configured) {
@@ -272,17 +167,8 @@ static void db_pagecache_config(void) {
     }
     size_t slot = ((size_t)DB_PAGE_BYTES + (size_t)hdr + 7) & ~(size_t)7;
     size_t slots = (size_t)DB_PAGECACHE_KIB * 1024 / DB_PAGE_BYTES + DB_PAGECACHE_SLACK;
-    size_t len = (slot * slots + huge - 1) & ~(huge - 1);
-    void *m = mmap(NULL, len + huge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (m == MAP_FAILED) {
-        return;
-    }
-    char *base = (char *)m + ((huge - (uintptr_t)m % huge) % huge);
-    if (madvise(base, len, MADV_HUGEPAGE)) {
-        util_log_limited(0, "warning: no transparent huge pages for the page cache");
-    }
-    memset(base, 0, len);
-    if (sqlite3_config(SQLITE_CONFIG_PAGECACHE, base, (int)slot, (int)slots) != SQLITE_OK) {
+    char *base = db_region(slot * slots);
+    if (base && sqlite3_config(SQLITE_CONFIG_PAGECACHE, base, (int)slot, (int)slots) != SQLITE_OK) {
         util_log_limited(0, "warning: page cache region rejected");
     }
 }
@@ -311,7 +197,7 @@ static void db_check_wal(void) {
 // Opens the database, applies the pragmas, prepares every statement and checks SELECT 1; exits on failure.
 static void db_open(const char *path) {
     db_path = path;
-    db_mem_config();
+    db_heap_config();
     db_pagecache_config();
     if (sqlite3_initialize() != SQLITE_OK) {
         util_die("sqlite3_initialize failed");
