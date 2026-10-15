@@ -72,7 +72,7 @@ enum {
 static_assert(JSON_DEPTH_MAX <= 64, "the container kind stack is one 64-bit word");
 
 // Powers of ten that a 64-bit long double mantissa holds exactly.
-static const long double json_pow10[] = {
+static const long double JSON_POW10[] = {
     1e0L,  1e1L,  1e2L,  1e3L,  1e4L,  1e5L,  1e6L,  1e7L,  1e8L,  1e9L,  1e10L, 1e11L, 1e12L, 1e13L,
     1e14L, 1e15L, 1e16L, 1e17L, 1e18L, 1e19L, 1e20L, 1e21L, 1e22L, 1e23L, 1e24L, 1e25L, 1e26L, 1e27L,
 };
@@ -148,7 +148,13 @@ static uint32_t json_decode_cp(const char *p, const char *end, uint32_t *cp) {
 
 // Returns the length of the UTF-8 form of cp.
 static uint32_t json_utf8_len(uint32_t cp) {
-    return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (cp < 0x80) {
+        return 1;
+    }
+    if (cp < 0x800) {
+        return 2;
+    }
+    return cp < 0x10000 ? 3 : 4;
 }
 
 // Writes cp as UTF-8 at dst and returns the length (1 to 4).
@@ -403,14 +409,14 @@ static int32_t json_exponent(const char *p, const char *end) {
 // Scales v by 10 to the power e10, with e10 already clamped to a few hundred.
 static long double json_scale10(long double v, int32_t e10) {
     while (e10 >= 27) {
-        v *= json_pow10[27];
+        v *= JSON_POW10[27];
         e10 -= 27;
     }
     while (e10 <= -27) {
-        v /= json_pow10[27];
+        v /= JSON_POW10[27];
         e10 += 27;
     }
-    return e10 >= 0 ? v * json_pow10[e10] : v / json_pow10[-e10];
+    return e10 >= 0 ? v * JSON_POW10[e10] : v / JSON_POW10[-e10];
 }
 
 // Converts a validated number literal to a double: exact for up to 19 digits and small exponents, close otherwise.
@@ -441,7 +447,8 @@ static double json_number_value(struct slice s) {
         return neg ? -__builtin_inf() : __builtin_inf();
     }
     long double v = total < -500 ? 0.0L : json_scale10((long double)m, total);
-    double r = v > (long double)DBL_MAX ? __builtin_inf() : (double)v;
+    // Values below the halfway point to 2^1024 still round to DBL_MAX.
+    double r = v >= (long double)DBL_MAX + 0x1p970L ? __builtin_inf() : (double)v;
     return neg ? -r : r;
 }
 
@@ -459,7 +466,7 @@ static int json_match_key(struct slice raw, bool escaped, const struct json_fiel
         n = (size_t)len;
     }
     for (unsigned i = 0; i < count; i++) {
-        if (strlen(fields[i].key) == n && !memcmp(fields[i].key, key, n)) {
+        if (strlen(fields[i].key) == n && memcmp(fields[i].key, key, n) == 0) {
             return (int)i;
         }
     }
@@ -517,7 +524,7 @@ static enum json_state json_close(struct json_ctx *c, char ch) {
 
 // Consumes the literal word true, false or null.
 static bool json_literal(struct json_ctx *c, const char *word, size_t n) {
-    if ((size_t)(c->end - c->p) < n || memcmp(c->p, word, n)) {
+    if ((size_t)(c->end - c->p) < n || memcmp(c->p, word, n) != 0) {
         return false;
     }
     c->p += n;
@@ -731,7 +738,8 @@ static uint32_t json_count_chars(struct slice s) {
 }
 
 // Parses a create body, unescapes and trims its "body" string into scratch, and applies the length rules.
-static NOT_YET_USED enum json_body_status json_create_body(struct slice doc, char *scratch, uint32_t cap, struct slice *out) {
+static NOT_YET_USED enum json_body_status json_create_body(struct slice doc, char *scratch, uint32_t cap,
+                                                           struct slice *out) {
     struct json_field body = {.key = "body"};
     out->p = scratch;
     out->n = 0;
