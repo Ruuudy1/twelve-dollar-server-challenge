@@ -1,5 +1,7 @@
 // Unity build entry: includes every module and SQLite itself, then runs startup and the pass loop.
 
+// The feature-test macro must carry its reserved name, so the naming checks are silenced for this one line.
+// NOLINTNEXTLINE(cert-dcl37-c,cert-dcl51-cpp,readability-identifier-naming,bugprone-reserved-identifier)
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <assert.h>
@@ -49,19 +51,33 @@ struct main_config {
     bool stats;
 };
 
+// A socket address viewed as the generic type bind() takes, without a pointer cast.
+union main_addr {
+    struct sockaddr sa;
+    struct sockaddr_in in;
+};
+
 // Sets the stop flag; the loop finishes its pass, commits and exits.
 static void main_on_signal(int sig) {
     (void)sig;
     stop_flag = 1;
 }
 
+// Installs one signal disposition, exiting on failure because it only runs at startup.
+static void main_sigaction(int sig, void (*handler)(int)) {
+    struct sigaction sa = {0};
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(sig, &sa, NULL)) {
+        util_die("sigaction %d failed: %s", sig, strerror(errno));
+    }
+}
+
 // Installs the stop handlers and ignores SIGPIPE.
 static void main_install_signals(void) {
-    struct sigaction sa = {0};
-    sa.sa_handler = main_on_signal;
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGINT, &sa, NULL);
-    signal(SIGPIPE, SIG_IGN);
+    main_sigaction(SIGTERM, main_on_signal);
+    main_sigaction(SIGINT, main_on_signal);
+    main_sigaction(SIGPIPE, SIG_IGN);
 }
 
 // Reads a required environment variable or exits with a message.
@@ -86,12 +102,15 @@ static void main_read_config(struct main_config *cfg) {
     cfg->port = (int)port;
 }
 
-// Raises the soft descriptor limit to the hard limit.
+// Raises the soft descriptor limit to the hard limit; a refusal keeps the current limit.
 static void main_raise_nofile(void) {
     struct rlimit rl;
-    if (!getrlimit(RLIMIT_NOFILE, &rl)) {
-        rl.rlim_cur = rl.rlim_max;
-        setrlimit(RLIMIT_NOFILE, &rl);
+    if (getrlimit(RLIMIT_NOFILE, &rl)) {
+        return;
+    }
+    rl.rlim_cur = rl.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &rl)) {
+        util_log_limited(2, "cannot raise the descriptor limit: %s", strerror(errno));
     }
 }
 
@@ -104,9 +123,11 @@ static void main_warn_conntrack(void) {
     }
     if (fgets(buf, sizeof buf, f)) {
         buf[strcspn(buf, "\n")] = 0;
-        fprintf(stderr, "warning: nf_conntrack_max is %s and may cap concurrent connections\n", buf);
+        // A failed write to stderr is not actionable at startup.
+        (void)fprintf(stderr, "warning: nf_conntrack_max is %s and may cap concurrent connections\n", buf);
     }
-    fclose(f);
+    // The file was only read, so a close failure loses nothing.
+    (void)fclose(f);
 }
 
 // Sets one integer socket option, exiting on failure.
@@ -119,8 +140,8 @@ static void main_setopt(int fd, int level, int name, int value) {
 // Creates the listening socket; accepted sockets inherit TCP_NODELAY and keepalive from it.
 static int main_listen(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
-    if (fd < 0 || inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    union main_addr addr = {.in = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)}};
+    if (fd < 0 || inet_pton(AF_INET, host, &addr.in.sin_addr) != 1) {
         util_die("cannot create listener for %s", host);
     }
     main_setopt(fd, SOL_SOCKET, SO_REUSEADDR, 1);
@@ -130,10 +151,16 @@ static int main_listen(const char *host, int port) {
     if (LISTEN_DEFER_ACCEPT_S) {
         main_setopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, LISTEN_DEFER_ACCEPT_S);
     }
-    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) || listen(fd, LISTEN_BACKLOG)) {
+    if (bind(fd, &addr.sa, sizeof addr.in) || listen(fd, LISTEN_BACKLOG)) {
         util_die("cannot listen on %s:%d: %s", host, port, strerror(errno));
     }
     return fd;
+}
+
+// Samples memory and, while shedding, closes the idle connections that are least recently active.
+static void main_memguard_tick(void) {
+    memguard_sample();
+    conn_shed_idle(memguard_shed_count(conn_live));
 }
 
 // Runs the periodic jobs that are due: controller sample, memory guard, stall sweep and stats line.
@@ -143,7 +170,7 @@ static void main_timers_run(struct main_timers *t, bool stats_on) {
         t->ctl_ns = clk.mono_ns + CTL_SAMPLE_MS * 1000000ULL;
     }
     if (clk.mono_ns >= t->mem_ns) {
-        memguard_sample();
+        main_memguard_tick();
         t->mem_ns = clk.mono_ns + MEMGUARD_INTERVAL_MS * 1000000ULL;
     }
     if (clk.mono_ns >= t->sweep_ns) {
@@ -217,7 +244,9 @@ int main(int argc, char **argv) {
     main_read_config(&cfg);
     int listen_fd = main_startup(&cfg);
     main_loop(cfg.stats);
-    close(listen_fd);
+    if (close(listen_fd)) {
+        util_log_limited(2, "closing the listener failed: %s", strerror(errno));
+    }
     db_close();
     return 0;
 }

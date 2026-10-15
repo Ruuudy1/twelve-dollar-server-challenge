@@ -7,8 +7,10 @@ static void pass_add_bad_request(uint32_t idx);
 static void pass_hold_buf(int buf_id);
 static void pass_note_closing(uint32_t idx);
 static void pass_mark_dirty(uint32_t idx);
+static void pass_note_eof(uint32_t idx);
 // Defined in ring.c.
 static void ring_buf_return(int buf_id);
+static void ring_kill_conn(uint32_t idx);
 
 // Block flags.
 enum {
@@ -48,6 +50,12 @@ enum {
     CONN_SENT_CONTINUE = 128,
     // No further requests are parsed: the last one closes the connection after its response.
     CONN_STOP_PARSE = 256,
+    // The connection is on the stall-sweep watch list.
+    CONN_WATCHED = 512,
+    // A cancel for the armed receive is queued; the receive ends with -ECANCELED.
+    CONN_RECV_CANCEL = 1024,
+    // The receive ended with -ENOBUFS and is re-armed once the buffers are back.
+    CONN_RECV_WAIT_BUFS = 2048,
 };
 
 // One record per connection, exactly 64 bytes, indexed by direct slot or DIRECT_SLOTS + fd.
@@ -69,18 +77,50 @@ struct conn {
     uint16_t out_blocks;
     // Highest cohort used by this connection in the current pass, and its requests in the current pass.
     uint8_t cohort, pass_works;
-    uint8_t pad[10];
+    uint8_t pad0[2];
+    // Position in the stall-sweep watch list while CONN_WATCHED is set.
+    uint32_t watch_pos;
+    uint8_t pad[4];
 };
 static_assert(sizeof(struct conn) == 64, "conn must stay one cache line");
+static_assert(offsetof(struct conn, watch_pos) % 4 == 0, "watch_pos must be aligned");
 
 static uint8_t *block_base;
 static uint32_t block_carved;
 static struct block *block_free;
+static uint8_t *block_jumbo_base;
 static struct block *block_jumbo_free;
 static uint32_t block_jumbo_made;
 static struct conn *conn_table;
 static uint32_t conn_live;
 static uint32_t conn_direct_live;
+static uint32_t conn_watch[CONN_MAX];
+static uint32_t conn_watch_n;
+static struct block *conn_deferred[BLOCK_JUMBO_MAX];
+static uint32_t conn_deferred_n;
+static uint32_t conn_age_hist[SHED_AGE_BUCKETS];
+
+// Maps zeroed address space aligned to POOL_ALIGN and asks for huge pages; NULL on failure.
+static void *pool_map(size_t bytes) {
+    void *m = mmap(NULL, bytes + POOL_ALIGN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (m == MAP_FAILED) {
+        return NULL;
+    }
+    uint8_t *base = m;
+    size_t skip = (POOL_ALIGN - (uintptr_t)base % POOL_ALIGN) % POOL_ALIGN;
+    base += skip;
+    // Huge pages are only a hint, so a refusal costs speed and nothing else.
+    (void)madvise(base, bytes, MADV_HUGEPAGE);
+    return base;
+}
+
+// Writes one byte per page so every page of a pool is faulted in before the first request.
+static void pool_touch(void *mem, size_t bytes) {
+    volatile uint8_t *p = mem;
+    for (size_t off = 0; off < bytes; off += 4096) {
+        p[off] = 0;
+    }
+}
 
 // Carves n more blocks out of the reserved region, touching each page once; returns false at the cap.
 static bool block_pool_grow(uint32_t n) {
@@ -92,9 +132,7 @@ static bool block_pool_grow(uint32_t n) {
     }
     for (uint32_t i = 0; i < n; i++) {
         uint8_t *base = block_base + (size_t)(block_carved + i) * BLOCK_BYTES;
-        for (size_t off = 0; off < BLOCK_BYTES; off += 4096) {
-            base[off] = 0;
-        }
+        pool_touch(base, BLOCK_BYTES);
         struct block *b = (struct block *)base;
         b->cap = BLOCK_BYTES - sizeof(struct block);
         b->next = block_free;
@@ -106,13 +144,11 @@ static bool block_pool_grow(uint32_t n) {
 
 // Reserves address space for the whole pool and carves the initial blocks; returns false on failure.
 static bool block_pool_init(void) {
-    size_t total = (size_t)BLOCK_CAP * BLOCK_BYTES;
-    void *m = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (m == MAP_FAILED) {
+    block_base = pool_map((size_t)BLOCK_CAP * BLOCK_BYTES);
+    block_jumbo_base = pool_map((size_t)BLOCK_JUMBO_MAX * BLOCK_JUMBO_BYTES);
+    if (!block_base || !block_jumbo_base) {
         return false;
     }
-    block_base = m;
-    madvise(block_base, total, MADV_HUGEPAGE);
     return block_pool_grow(BLOCK_INITIAL);
 }
 
@@ -134,14 +170,12 @@ static struct block *block_get(void) {
 // Takes a 64 KB block for an oversized body; NULL when BLOCK_JUMBO_MAX are all in use.
 static struct block *block_get_jumbo(void) {
     if (!block_jumbo_free) {
-        if (block_jumbo_made >= BLOCK_JUMBO_MAX) {
+        if (!block_jumbo_base || block_jumbo_made >= BLOCK_JUMBO_MAX) {
             return NULL;
         }
-        void *m = mmap(NULL, BLOCK_JUMBO_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (m == MAP_FAILED) {
-            return NULL;
-        }
-        struct block *made = m;
+        uint8_t *base = block_jumbo_base + (size_t)block_jumbo_made * BLOCK_JUMBO_BYTES;
+        pool_touch(base, BLOCK_JUMBO_BYTES);
+        struct block *made = (struct block *)base;
         made->cap = BLOCK_JUMBO_BYTES - sizeof(struct block);
         made->next = NULL;
         block_jumbo_free = made;
@@ -191,7 +225,7 @@ struct err_def {
 
 #define ERR_DEF(st, msg) {(st), {"{\"error\":\"" msg "\"}", sizeof("{\"error\":\"" msg "\"}") - 1}}
 
-static const struct err_def err_defs[ERR_COUNT] = {
+static const struct err_def ERR_DEFS[ERR_COUNT] = {
     [ERR_NOT_FOUND] = ERR_DEF(404, "not found"),
     [ERR_INVALID_ID] = ERR_DEF(400, "invalid post id"),
     [ERR_POST_NOT_FOUND] = ERR_DEF(404, "post not found"),
@@ -327,9 +361,9 @@ static void resp_finish(struct resp *r, unsigned status, bool close) {
 // Replaces whatever the response held with the prebuilt error body and finishes it.
 static void resp_error(struct resp *r, enum err_id id, bool close) {
     r->w = (char *)r->blk->data + RESP_HDR_ROOM;
-    memcpy(r->w, err_defs[id].json.p, err_defs[id].json.n);
-    r->w += err_defs[id].json.n;
-    resp_finish(r, err_defs[id].status, close);
+    memcpy(r->w, ERR_DEFS[id].json.p, ERR_DEFS[id].json.n);
+    r->w += ERR_DEFS[id].json.n;
+    resp_finish(r, ERR_DEFS[id].status, close);
 }
 
 // Rewrites a finished block in place as a 500, keeping its close flag; used when COMMIT fails.
@@ -344,12 +378,11 @@ static void resp_rewrite_500(struct block *b) {
 // Maps the connection table and zeroes it; returns false on failure.
 static bool conn_table_init(void) {
     size_t total = (size_t)CONN_MAX * sizeof(struct conn);
-    void *m = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (m == MAP_FAILED) {
+    conn_table = pool_map(total);
+    if (!conn_table) {
         return false;
     }
-    conn_table = m;
-    madvise(conn_table, total, MADV_HUGEPAGE);
+    pool_touch(conn_table, total);
     return true;
 }
 
@@ -368,6 +401,32 @@ static int conn_target(uint32_t idx) {
     return conn_is_direct(idx) ? (int)idx : (int)(idx - DIRECT_SLOTS);
 }
 
+// Returns the table index of a connection record.
+static uint32_t conn_index(const struct conn *c) {
+    return (uint32_t)(c - conn_table);
+}
+
+// Lists a connection that holds input or output so the stall sweep can see it; one entry per connection.
+static void conn_watch_add(struct conn *c) {
+    if (c->flags & CONN_WATCHED) {
+        return;
+    }
+    c->flags |= CONN_WATCHED;
+    c->watch_pos = conn_watch_n;
+    conn_watch[conn_watch_n++] = conn_index(c);
+}
+
+// Removes a connection from the watch list by moving the last entry into its place.
+static void conn_watch_drop(struct conn *c) {
+    if (!(c->flags & CONN_WATCHED)) {
+        return;
+    }
+    uint32_t last = conn_watch[--conn_watch_n];
+    conn_watch[c->watch_pos] = last;
+    conn_get(last)->watch_pos = c->watch_pos;
+    c->flags &= (uint16_t)~CONN_WATCHED;
+}
+
 // Resets the record for a newly accepted connection, keeping its generation.
 static void conn_open(uint32_t idx) {
     struct conn *c = conn_get(idx);
@@ -383,6 +442,10 @@ static void conn_open(uint32_t idx) {
 // Frees every block of a connection, bumps its generation and clears it; the only way a connection ends.
 static void conn_release(uint32_t idx) {
     struct conn *c = conn_get(idx);
+    if (!(c->flags & CONN_OPEN)) {
+        return;
+    }
+    conn_watch_drop(c);
     if (c->in) {
         block_put(c->in);
     }
@@ -408,6 +471,7 @@ static void conn_queue(struct conn *c, struct block *b) {
     }
     c->out_tail = b;
     c->out_blocks++;
+    conn_watch_add(c);
     if (b->flags & BLOCK_F_CLOSE) {
         c->flags |= CONN_CLOSE_AFTER_SEND;
     }
@@ -450,6 +514,35 @@ static void conn_queue_continue(uint32_t idx, struct conn *c) {
     c->flags |= CONN_SENT_CONTINUE;
 }
 
+// Moves the overflow input into a jumbo block with room for n more bytes; false when none is free or it cannot fit.
+static bool conn_in_grow(struct conn *c, uint32_t n) {
+    struct block *old = c->in;
+    if (old->flags & BLOCK_F_JUMBO || conn_deferred_n >= BLOCK_JUMBO_MAX) {
+        return false;
+    }
+    struct block *big = block_get_jumbo();
+    if (!big) {
+        return false;
+    }
+    if (n > big->cap || c->in_len > big->cap - n) {
+        block_put(big);
+        return false;
+    }
+    memcpy(big->data, old->data, c->in_len);
+    c->in = big;
+    // Requests queued in this pass may still point into the old block, so it is freed at the end of the pass.
+    conn_deferred[conn_deferred_n++] = old;
+    return true;
+}
+
+// Frees the input blocks that were replaced during the pass; called once requests no longer point into them.
+static void conn_defer_flush(void) {
+    for (uint32_t i = 0; i < conn_deferred_n; i++) {
+        block_put(conn_deferred[i]);
+    }
+    conn_deferred_n = 0;
+}
+
 // Appends n received bytes to the overflow input block, allocating it when absent; false when it would overflow.
 static bool conn_in_append(struct conn *c, const char *data, uint32_t n) {
     if (!c->in) {
@@ -457,8 +550,9 @@ static bool conn_in_append(struct conn *c, const char *data, uint32_t n) {
         if (!c->in) {
             return false;
         }
+        conn_watch_add(c);
     }
-    if (n > c->in->cap || c->in_len > c->in->cap - n) {
+    if ((n > c->in->cap || c->in_len > c->in->cap - n) && !conn_in_grow(c, n)) {
         return false;
     }
     memcpy(c->in->data + c->in_len, data, n);
@@ -517,7 +611,6 @@ static void conn_feed(uint32_t idx, char *data, uint32_t n, int buf_id) {
     pass_touch(idx);
     c->last_active_s = (uint32_t)(clk.mono_ns / 1000000000ULL);
     uint32_t works_before = c->pass_works;
-    bool ok = true;
     if (c->flags & CONN_STOP_PARSE) {
         if (buf_id >= 0) {
             ring_buf_return(buf_id);
@@ -525,7 +618,7 @@ static void conn_feed(uint32_t idx, char *data, uint32_t n, int buf_id) {
         return;
     }
     if (c->in || (c->flags & CONN_PAUSED)) {
-        ok = !n || conn_in_append(c, data, n);
+        bool ok = !n || conn_in_append(c, data, n);
         if (buf_id >= 0) {
             ring_buf_return(buf_id);
         }
@@ -550,12 +643,78 @@ static void conn_feed(uint32_t idx, char *data, uint32_t n, int buf_id) {
     }
 }
 
-// Closes connections that made no progress for STALL_TIMEOUT_S; runs every SWEEP_INTERVAL_S.
-static NOT_YET_USED void conn_sweep(uint32_t now_s) {
-    (void)now_s;
+// Handles end of input: later bytes are dropped and the connection closes once its queued output is sent.
+static void conn_peer_closed(uint32_t idx) {
+    struct conn *c = conn_get(idx);
+    c->flags |= CONN_STOP_PARSE | CONN_CLOSE_AFTER_SEND;
+    pass_note_eof(idx);
 }
 
-// Closes up to count idle connections, least recently active first; called by the memory guard.
-static NOT_YET_USED void conn_shed_idle(uint32_t count) {
-    (void)count;
+// True while the connection holds partial input, queued output or a send in flight.
+static bool conn_busy(const struct conn *c) {
+    return c->in || c->out_head || (c->flags & CONN_SEND_INFLIGHT);
+}
+
+// Closes watched connections that made no progress for STALL_TIMEOUT_S and drops idle ones from the list.
+static void conn_sweep(uint32_t now_s) {
+    uint32_t i = 0;
+    while (i < conn_watch_n) {
+        uint32_t idx = conn_watch[i];
+        struct conn *c = conn_get(idx);
+        if (!conn_busy(c)) {
+            conn_watch_drop(c);
+            continue;
+        }
+        if (now_s - c->last_active_s < STALL_TIMEOUT_S) {
+            i++;
+            continue;
+        }
+        uint32_t before = conn_watch_n;
+        c->last_active_s = now_s;
+        ring_kill_conn(idx);
+        i += before == conn_watch_n;
+    }
+}
+
+// True for an open connection with nothing queued, nothing partial and nothing in flight.
+static bool conn_is_idle(const struct conn *c) {
+    return (c->flags & CONN_OPEN) && !(c->flags & (CONN_CLOSING | CONN_SEND_INFLIGHT)) && !conn_busy(c);
+}
+
+// Returns the histogram bucket for the age of a connection.
+static uint32_t conn_age_bucket(const struct conn *c, uint32_t now_s) {
+    uint32_t age = now_s - c->last_active_s;
+    return age < SHED_AGE_BUCKETS ? age : SHED_AGE_BUCKETS - 1;
+}
+
+// Closes up to count idle connections, least recently active first; called by the memory guard between passes.
+static void conn_shed_idle(uint32_t count) {
+    uint32_t now_s = (uint32_t)(clk.mono_ns / 1000000000ULL);
+    uint32_t acc = 0;
+    uint32_t t = SHED_AGE_BUCKETS;
+    if (!count) {
+        return;
+    }
+    memset(conn_age_hist, 0, sizeof conn_age_hist);
+    for (uint32_t i = 0; i < CONN_MAX; i++) {
+        if (conn_is_idle(conn_get(i))) {
+            conn_age_hist[conn_age_bucket(conn_get(i), now_s)]++;
+        }
+    }
+    while (t > 0 && acc < count) {
+        acc += conn_age_hist[--t];
+    }
+    uint32_t above = acc - conn_age_hist[t];
+    uint32_t left_at_t = count > above ? count - above : 0;
+    for (uint32_t i = 0; i < CONN_MAX && count; i++) {
+        if (!conn_is_idle(conn_get(i))) {
+            continue;
+        }
+        uint32_t b = conn_age_bucket(conn_get(i), now_s);
+        if (b > t || (b == t && left_at_t)) {
+            left_at_t -= b == t;
+            count--;
+            ring_kill_conn(i);
+        }
+    }
 }
