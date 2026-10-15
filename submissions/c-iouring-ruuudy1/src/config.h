@@ -84,5 +84,9 @@
 #define FEED_LIMIT 20
 #define FEED_SPAN_MAX 128
 
+// JWT limits (crypto module): longest header or payload segment, and the signature segment length (32 bytes, unpadded).
+#define JWT_SEGMENT_MAX 8192
+#define JWT_SIG_CHARS 43
+
 // Stats line period in seconds when --stats is given.
 #define STATS_INTERVAL_S 10
