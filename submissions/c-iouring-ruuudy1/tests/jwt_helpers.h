@@ -75,7 +75,9 @@ static struct jwt_guarded jwt_guard(const char *s, size_t n, bool tail) {
     mprotect(g.map, page, PROT_NONE);
     mprotect(g.map + page + body, page, PROT_NONE);
     uint8_t *dst = tail ? g.map + page + body - n : g.map + page;
-    memcpy(dst, s, n);
+    if (n) {
+        memcpy(dst, s, n);
+    }
     g.p = (const char *)dst;
     return g;
 }
