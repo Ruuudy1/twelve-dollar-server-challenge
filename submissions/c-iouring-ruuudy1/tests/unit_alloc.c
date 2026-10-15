@@ -40,6 +40,7 @@ static uint64_t measure(const char *label, unsigned count, bool (*make)(unsigned
     uint64_t base_calls = db_mem.calls;
     uint64_t base_libc = db_mem.libc_calls;
     uint8_t *base_next = db_mem.next;
+    uint64_t t0 = util_mono_ns();
     for (unsigned i = 0; i < count; i++) {
         CHECK(make(i, &rq, scratch));
         alloc_counting = true;
@@ -53,9 +54,10 @@ static uint64_t measure(const char *label, unsigned count, bool (*make)(unsigned
         }
     }
     uint64_t total = alloc_count - base_all;
-    printf("%-10s %u requests: %llu libc allocations, %llu SQLite allocations from the region (%llu to libc, region grew %lld bytes)\n",
+    double us = (double)(util_mono_ns() - t0) / 1000.0 / count;
+    printf("%-10s %u requests: %llu libc allocations, %llu SQLite allocations from the region (%llu to libc, region grew %lld bytes), %.2f us each\n",
            label, count, (unsigned long long)total, (unsigned long long)(db_mem.calls - base_calls),
-           (unsigned long long)(db_mem.libc_calls - base_libc), (long long)(db_mem.next - base_next));
+           (unsigned long long)(db_mem.libc_calls - base_libc), (long long)(db_mem.next - base_next), us);
     CHECK(db_mem.libc_calls == base_libc);
     if (count >= 10000) {
         // A recycled block can still need one more of a size class the first time two are live at once; a leak would grow
