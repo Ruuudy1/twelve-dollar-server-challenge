@@ -128,7 +128,12 @@ static void db_reset(enum db_stmt id) {
 // Gives SQLite one region of huge pages for the page cache so a cache hit never reaches malloc.
 static void db_pagecache_config(void) {
     static const size_t huge = (size_t)2 << 20;
+    static bool configured;
     int hdr = 0;
+    if (configured) {
+        return;
+    }
+    configured = true;
     if (sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &hdr) != SQLITE_OK || hdr <= 0) {
         return;
     }
@@ -307,6 +312,12 @@ static void db_close(void) {
         sqlite3_finalize(db_stmts[i]);
     }
     sqlite3_close(db_handle);
+    db_handle = NULL;
+    db_in_txn = false;
+    db_batch_failed = false;
+    db_wal_frames = 0;
+    db_wal_synced = 0;
+    db_ckpt_at = CKPT_FRAMES;
     if (db_wal_fd >= 0) {
         close(db_wal_fd);
         db_wal_fd = -1;

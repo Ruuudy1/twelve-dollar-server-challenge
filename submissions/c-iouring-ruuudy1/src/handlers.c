@@ -389,26 +389,26 @@ static bool handler_insert_post(int64_t user_id, struct slice text, int64_t *pos
     return ok;
 }
 
-// Builds the body of a created post from the token, the validated text and the new row.
+// Inserts the post for a user and writes the 201 body with the stored id and created_at.
+static int handler_create_apply(struct resp *r, int64_t user_id, struct slice author, struct slice text) {
+    struct handler_row row = {.body = text, .author = author};
+    if (!db_touch() || !handler_insert_post(user_id, text, &row.id, &row.created)) {
+        return ERR_INTERNAL;
+    }
+    bool ok = resp_put(r, "{\"post\":", LIT_LEN("{\"post\":")) && handler_emit_object(r, &row, 0);
+    return ok && resp_put(r, "}", 1) ? HANDLER_OK : ERR_INTERNAL;
+}
+
+// Builds the body of a created post: token, then body validation, then the insert.
 static int handler_create_body(const struct work *w, struct resp *r) {
     struct auth_identity who = {0};
     struct slice text = {0};
-    struct handler_row row = {0};
     int rc = handler_auth(w, &who);
     if (rc != HANDLER_OK) {
         return rc;
     }
     rc = handler_create_text(w, &text);
-    if (rc != HANDLER_OK) {
-        return rc;
-    }
-    if (!db_touch() || !handler_insert_post(who.user_id, text, &row.id, &row.created)) {
-        return ERR_INTERNAL;
-    }
-    row.body = text;
-    row.author = who.name;
-    bool ok = resp_put(r, "{\"post\":", LIT_LEN("{\"post\":")) && handler_emit_object(r, &row, 0);
-    return ok && resp_put(r, "}", 1) ? HANDLER_OK : ERR_INTERNAL;
+    return rc == HANDLER_OK ? handler_create_apply(r, who.user_id, who.name, text) : rc;
 }
 
 // Runs the existence check of a like; returns HANDLER_OK, ERR_POST_NOT_FOUND or ERR_INTERNAL.
@@ -424,26 +424,16 @@ static int handler_post_exists(int64_t post_id) {
     return rc == SQLITE_DONE ? ERR_POST_NOT_FOUND : ERR_INTERNAL;
 }
 
-// Builds the like answer; *fresh tells a first like (201) from a repeat (200).
-static int handler_like_body(const struct work *w, struct resp *r, bool *fresh) {
-    struct auth_identity who = {0};
-    int64_t post_id = 0;
-    int rc = handler_auth(w, &who);
-    if (rc != HANDLER_OK) {
-        return rc;
-    }
-    enum route_id_status parsed = route_parse_id(w->route.id, &post_id);
-    if (parsed != ID_OK) {
-        return parsed == ID_INVALID ? ERR_INVALID_ID : ERR_POST_NOT_FOUND;
-    }
+// Records the like of a post by a user and writes the answer; *fresh tells a first like (201) from a repeat (200).
+static int handler_like_apply(struct resp *r, int64_t user_id, int64_t post_id, bool *fresh) {
     if (!db_touch()) {
         return ERR_INTERNAL;
     }
-    rc = handler_post_exists(post_id);
+    int rc = handler_post_exists(post_id);
     if (rc != HANDLER_OK) {
         return rc;
     }
-    bool bound = handler_bind_int(DB_LIKE, 1, who.user_id) && handler_bind_int(DB_LIKE, 2, post_id);
+    bool bound = handler_bind_int(DB_LIKE, 1, user_id) && handler_bind_int(DB_LIKE, 2, post_id);
     rc = bound ? db_step(DB_LIKE) : SQLITE_ERROR;
     db_reset(DB_LIKE);
     char *o = resp_need(r, 96);
@@ -458,6 +448,21 @@ static int handler_like_body(const struct work *w, struct resp *r, bool *fresh) 
     *o++ = '}';
     r->w = o;
     return HANDLER_OK;
+}
+
+// Builds the like answer: token first, then the id, then the database work.
+static int handler_like_body(const struct work *w, struct resp *r, bool *fresh) {
+    struct auth_identity who = {0};
+    int64_t post_id = 0;
+    int rc = handler_auth(w, &who);
+    if (rc != HANDLER_OK) {
+        return rc;
+    }
+    enum route_id_status parsed = route_parse_id(w->route.id, &post_id);
+    if (parsed != ID_OK) {
+        return parsed == ID_INVALID ? ERR_INVALID_ID : ERR_POST_NOT_FOUND;
+    }
+    return handler_like_apply(r, who.user_id, post_id, fresh);
 }
 
 // Finishes a response with the given success status, or replaces it with the error a builder returned.
