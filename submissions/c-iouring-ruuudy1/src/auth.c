@@ -43,7 +43,7 @@ enum { AUTH_F_EXP, AUTH_F_NBF, AUTH_F_SUB, AUTH_F_USERNAME, AUTH_F_COUNT };
 
 static struct sha256_hmac_key auth_key;
 
-static const uint8_t auth_b64_table[256] = {
+static const uint8_t AUTH_B64_TABLE[256] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3e, 0xff, 0xff,
@@ -71,7 +71,7 @@ static void auth_init(const char *secret, size_t n) {
 static bool auth_b64url_tail(const uint8_t *p, uint32_t rem, uint8_t *out) {
     uint32_t bits = 0;
     for (uint32_t i = 0; i < rem; i++) {
-        uint32_t v = auth_b64_table[p[i]];
+        uint32_t v = AUTH_B64_TABLE[p[i]];
         if (v > AUTH_B64_MAX) {
             return false;
         }
@@ -89,15 +89,16 @@ static bool auth_b64url_tail(const uint8_t *p, uint32_t rem, uint8_t *out) {
 static int64_t auth_b64url_decode(struct slice in, uint8_t *out, uint32_t cap) {
     uint32_t rem = in.n % 4;
     uint32_t groups = in.n / 4;
-    if (rem == 1 || cap < groups * 3 + (rem ? rem - 1 : 0)) {
+    uint32_t bytes = groups * 3 + (rem ? rem - 1 : 0);
+    if (rem == 1 || cap < bytes) {
         return -1;
     }
     const uint8_t *p = (const uint8_t *)in.p;
     for (uint32_t g = 0; g < groups; g++) {
-        uint32_t a = auth_b64_table[p[4 * g]];
-        uint32_t b = auth_b64_table[p[4 * g + 1]];
-        uint32_t c = auth_b64_table[p[4 * g + 2]];
-        uint32_t d = auth_b64_table[p[4 * g + 3]];
+        uint32_t a = AUTH_B64_TABLE[p[4 * g]];
+        uint32_t b = AUTH_B64_TABLE[p[4 * g + 1]];
+        uint32_t c = AUTH_B64_TABLE[p[4 * g + 2]];
+        uint32_t d = AUTH_B64_TABLE[p[4 * g + 3]];
         if ((a | b | c | d) > AUTH_B64_MAX) {
             return -1;
         }
@@ -109,7 +110,7 @@ static int64_t auth_b64url_decode(struct slice in, uint8_t *out, uint32_t cap) {
     if (rem && !auth_b64url_tail(p + 4 * groups, rem, out + 3 * groups)) {
         return -1;
     }
-    return groups * 3 + (rem ? rem - 1 : 0);
+    return (int64_t)bytes;
 }
 
 // Splits the token at its two dots into slices of the header value; false when the shape is wrong.
@@ -238,7 +239,8 @@ static enum auth_status auth_check_payload(struct slice payload, int64_t now_s, 
 // Checks an Authorization header value in the order the spec fixes: scheme, shape, algorithm, signature, exp, payload.
 static NOT_YET_USED enum auth_status auth_check(struct slice header, int64_t now_s, char *scratch, uint32_t cap,
                                                 struct auth_identity *id) {
-    if (header.n < LIT_LEN(AUTH_SCHEME) || memcmp(header.p, AUTH_SCHEME, LIT_LEN(AUTH_SCHEME))) {
+    bool has_scheme = header.n >= LIT_LEN(AUTH_SCHEME) && !memcmp(header.p, AUTH_SCHEME, LIT_LEN(AUTH_SCHEME));
+    if (!has_scheme) {
         return AUTH_MISSING;
     }
     struct auth_token t;

@@ -20,11 +20,11 @@ enum {
     SHA256_OPAD = 0x5c,
 };
 
-static const uint32_t sha256_iv[SHA256_STATE_WORDS] = {
+static const uint32_t SHA256_IV[SHA256_STATE_WORDS] = {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 };
 
-static const uint32_t sha256_k[SHA256_ROUNDS] __attribute__((aligned(16))) = {
+static const uint32_t SHA256_K[SHA256_ROUNDS] __attribute__((aligned(16))) = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -73,13 +73,13 @@ static inline void sha256_schedule(uint32_t w[SHA256_ROUNDS], const uint8_t *blo
 // Portable compression of nblocks consecutive 64-byte blocks into the state.
 static void sha256_blocks_scalar(uint32_t st[SHA256_STATE_WORDS], const uint8_t *p, size_t nblocks) {
     for (; nblocks; nblocks--, p += SHA256_BLOCK) {
-        uint32_t w[SHA256_ROUNDS];
+        uint32_t w[SHA256_ROUNDS] = {0};
         sha256_schedule(w, p);
         uint32_t a = st[0], b = st[1], c = st[2], d = st[3];
         uint32_t e = st[4], f = st[5], g = st[6], h = st[7];
         for (unsigned i = 0; i < SHA256_ROUNDS; i++) {
             uint32_t s1 = sha256_ror(e, 6) ^ sha256_ror(e, 11) ^ sha256_ror(e, 25);
-            uint32_t t1 = h + s1 + ((e & f) ^ (~e & g)) + sha256_k[i] + w[i];
+            uint32_t t1 = h + s1 + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i];
             uint32_t s0 = sha256_ror(a, 2) ^ sha256_ror(a, 13) ^ sha256_ror(a, 22);
             uint32_t t2 = s0 + ((a & b) ^ (a & c) ^ (b & c));
             h = g;
@@ -129,7 +129,7 @@ static void sha256_blocks_ni(uint32_t st[SHA256_STATE_WORDS], const uint8_t *p, 
                                             _mm_alignr_epi8(m[(i + 3) & 3], m[(i + 2) & 3], 4));
                 m[i & 3] = _mm_sha256msg2_epu32(mix, m[(i + 3) & 3]);
             }
-            __m128i k = _mm_load_si128((const __m128i *)(const void *)&sha256_k[4 * i]);
+            __m128i k = _mm_load_si128((const __m128i *)(const void *)&SHA256_K[4 * i]);
             sha256_ni_rounds(&abef, &cdgh, _mm_add_epi32(m[i & 3], k));
         }
         abef = _mm_add_epi32(abef, save_abef);
@@ -179,7 +179,7 @@ static void sha256_run(const uint32_t init[SHA256_STATE_WORDS], uint64_t prefix,
 
 // Hashes msg into a 32-byte digest.
 static void sha256_hash(const void *msg, size_t n, uint8_t out[SHA256_DIGEST]) {
-    sha256_run(sha256_iv, 0, msg, n, out);
+    sha256_run(SHA256_IV, 0, msg, n, out);
 }
 
 // Zeroes a buffer in a way the compiler cannot drop, so key material does not linger on the stack.
@@ -190,11 +190,11 @@ static void sha256_wipe(void *p, size_t n) {
 
 // Absorbs one pad block (key xor pad byte) from the IV into a midstate.
 static void sha256_pad_state(uint32_t st[SHA256_STATE_WORDS], const uint8_t key[SHA256_BLOCK], uint8_t pad) {
-    uint8_t block[SHA256_BLOCK];
+    uint8_t block[SHA256_BLOCK] = {0};
     for (unsigned i = 0; i < SHA256_BLOCK; i++) {
         block[i] = (uint8_t)(key[i] ^ pad);
     }
-    memcpy(st, sha256_iv, sizeof sha256_iv);
+    memcpy(st, SHA256_IV, sizeof SHA256_IV);
     sha256_blocks(st, block, 1);
     sha256_wipe(block, sizeof block);
 }
