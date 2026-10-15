@@ -38,7 +38,7 @@ enum db_stmt {
 
 #define DB_FEED_ROW_COLUMNS "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id "
 
-static const char *const db_sql[DB_STMT_COUNT] = {
+static const char *const DB_SQL[DB_STMT_COUNT] = {
     [DB_PING] = "SELECT 1",
     [DB_BEGIN] = "BEGIN",
     [DB_COMMIT] = "COMMIT",
@@ -56,7 +56,7 @@ static const char *const db_sql[DB_STMT_COUNT] = {
 };
 
 // Pragmas in the order the spec fixes; locking_mode must come before the first WAL access.
-static const char db_pragmas[] =
+static const char DB_PRAGMAS[] =
     "PRAGMA locking_mode=EXCLUSIVE;"
     "PRAGMA journal_mode=WAL;"
     "PRAGMA synchronous=NORMAL;"
@@ -188,10 +188,10 @@ static void *db_mem_malloc(int n) {
 
 // Returns a block to its free list, or to libc when it came from there.
 static void db_mem_free(void *p) {
-    uint64_t *block = (uint64_t *)p - 1;
     if (!p) {
         return;
     }
+    uint64_t *block = (uint64_t *)p - 1;
     if ((block[0] & 0xff) == DB_MEM_LIBC) {
         free(block);
         return;
@@ -299,7 +299,7 @@ static void db_check_wal(void) {
     sqlite3_stmt *st = NULL;
     db_pragma_row("PRAGMA journal_mode", &st);
     const unsigned char *mode = sqlite3_column_text(st, 0);
-    if (!mode || strcmp((const char *)mode, "wal")) {
+    if (!mode || strcmp((const char *)mode, "wal") != 0) {
         util_die("database is not in WAL mode");
     }
     sqlite3_finalize(st);
@@ -320,15 +320,15 @@ static void db_open(const char *path) {
         util_die("cannot open %s: %s", path, sqlite3_errmsg(db_handle));
     }
     char *err = NULL;
-    if (sqlite3_exec(db_handle, db_pragmas, NULL, NULL, &err) != SQLITE_OK) {
+    if (sqlite3_exec(db_handle, DB_PRAGMAS, NULL, NULL, &err) != SQLITE_OK) {
         util_die("pragmas failed: %s", err ? err : "unknown");
     }
     db_check_wal();
     sqlite3_wal_hook(db_handle, db_wal_hook, NULL);
     for (int i = 0; i < DB_STMT_COUNT; i++) {
-        int rc = sqlite3_prepare_v3(db_handle, db_sql[i], -1, SQLITE_PREPARE_PERSISTENT, &db_stmts[i], NULL);
+        int rc = sqlite3_prepare_v3(db_handle, DB_SQL[i], -1, SQLITE_PREPARE_PERSISTENT, &db_stmts[i], NULL);
         if (rc != SQLITE_OK) {
-            util_die("prepare failed (%s): %s", sqlite3_errmsg(db_handle), db_sql[i]);
+            util_die("prepare failed (%s): %s", sqlite3_errmsg(db_handle), DB_SQL[i]);
         }
     }
     if (db_run(DB_PING) != SQLITE_ROW) {

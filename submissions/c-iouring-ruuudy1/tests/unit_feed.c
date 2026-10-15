@@ -212,29 +212,29 @@ static void test_plans(void) {
         fprintf(stderr, "note: SQLite %s, plans were pinned on 3.53.4\n", sqlite3_libversion());
     }
     for (int i = DB_FEED_IDS; i < DB_STMT_COUNT; i++) {
-        plan_of(db_sql[i], plan, sizeof plan);
+        plan_of(DB_SQL[i], plan, sizeof plan);
         if (getenv("FX_SHOW_PLANS")) {
-            printf("--- %d %s\n%s", i, db_sql[i], plan);
+            printf("--- %d %s\n%s", i, DB_SQL[i], plan);
         }
-        check_plan_rules(plan, db_sql[i]);
+        check_plan_rules(plan, DB_SQL[i]);
     }
-    plan_of(db_sql[DB_FEED_IDS], plan, sizeof plan);
+    plan_of(DB_SQL[DB_FEED_IDS], plan, sizeof plan);
     CHECK(plan_has(plan, "SCAN posts USING COVERING INDEX posts_created_at_id_idx"));
-    plan_of(db_sql[DB_FEED_LIKES], plan, sizeof plan);
+    plan_of(DB_SQL[DB_FEED_LIKES], plan, sizeof plan);
     CHECK(plan_has(plan, "SEARCH likes USING COVERING INDEX likes_post_id_idx (post_id>? AND post_id<?)"));
-    plan_of(db_sql[DB_FEED_ROWS_DESC], plan, sizeof plan);
+    plan_of(DB_SQL[DB_FEED_ROWS_DESC], plan, sizeof plan);
     CHECK(plan_has(plan, "SEARCH p USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)"));
     CHECK(plan_has(plan, "SEARCH u USING INTEGER PRIMARY KEY (rowid=?)"));
-    plan_of(db_sql[DB_FEED_ROWS], plan, sizeof plan);
+    plan_of(DB_SQL[DB_FEED_ROWS], plan, sizeof plan);
     CHECK(plan_has(plan, "SEARCH p USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)"));
-    plan_of(db_sql[DB_FEED_REF], plan, sizeof plan);
+    plan_of(DB_SQL[DB_FEED_REF], plan, sizeof plan);
     CHECK(plan_has(plan, "SCAN p USING INDEX posts_created_at_id_idx"));
     CHECK(plan_has(plan, "SEARCH l USING COVERING INDEX likes_post_id_idx (post_id=?)"));
-    plan_of(db_sql[DB_POST], plan, sizeof plan);
+    plan_of(DB_SQL[DB_POST], plan, sizeof plan);
     CHECK(plan_has(plan, "SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"));
-    plan_of(db_sql[DB_CREATE_TS], plan, sizeof plan);
+    plan_of(DB_SQL[DB_CREATE_TS], plan, sizeof plan);
     CHECK(plan_has(plan, "SEARCH posts USING INTEGER PRIMARY KEY (rowid=?)"));
-    plan_of(db_sql[DB_EXISTS], plan, sizeof plan);
+    plan_of(DB_SQL[DB_EXISTS], plan, sizeof plan);
     CHECK(plan_has(plan, "SEARCH posts USING INTEGER PRIMARY KEY (rowid=?)"));
     fx_server_close();
     fx_rmdir(dir);
