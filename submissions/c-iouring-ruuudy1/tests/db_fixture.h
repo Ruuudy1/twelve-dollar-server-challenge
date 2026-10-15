@@ -334,13 +334,11 @@ static void fx_post_json(const char *path, const char *auth, const char *body, s
     fx_pass(&rq, 1, out);
 }
 
-// Builds a signed token for a user with the module's own HMAC; exp is seconds from now.
-static void fx_token(char *out, size_t cap, const char *sub, const char *name, int64_t exp_delta) {
+// Signs a payload with the module's own HMAC and writes header.payload.signature.
+static void fx_sign(char *out, size_t cap, const char *payload) {
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    char payload[512];
-    char raw[512];
-    int pn = snprintf(payload, sizeof payload, "{\"sub\":\"%s\",\"username\":\"%s\",\"iat\":%lld,\"exp\":%lld}", sub, name,
-                      (long long)clk.real_s, (long long)(clk.real_s + exp_delta));
+    char raw[1024];
+    int pn = (int)strlen(payload);
     uint8_t mac[32];
     size_t o = 0;
     size_t on = 0;
@@ -376,4 +374,12 @@ static void fx_token(char *out, size_t cap, const char *sub, const char *name, i
         }
     }
     out[o] = 0;
+}
+
+// Builds a signed token for a user; exp is seconds from now.
+static void fx_token(char *out, size_t cap, const char *sub, const char *name, int64_t exp_delta) {
+    char payload[512];
+    snprintf(payload, sizeof payload, "{\"sub\":\"%s\",\"username\":\"%s\",\"iat\":%lld,\"exp\":%lld}", sub, name,
+             (long long)clk.real_s, (long long)(clk.real_s + exp_delta));
+    fx_sign(out, cap, payload);
 }
