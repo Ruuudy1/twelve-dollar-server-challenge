@@ -63,7 +63,7 @@ static struct io_uring_sqe *ring_sqe(void) {
 
 // Hands every buffer to the kernel as classic provided buffers, for kernels that refuse a provided-buffer ring.
 static void ring_provide_legacy(void) {
-    struct io_uring_cqe *cqe;
+    struct io_uring_cqe *cqe = NULL;
     struct io_uring_sqe *sqe = ring_sqe();
     io_uring_prep_provide_buffers(sqe, ring_buf_mem, PROV_BUF_SIZE, PROV_BUF_COUNT, PROV_BUF_GROUP, 0);
     io_uring_sqe_set_data64(sqe, ring_tag(RING_OP_IGNORE, 0, 0));
@@ -71,7 +71,7 @@ static void ring_provide_legacy(void) {
     if (rc >= 0) {
         rc = io_uring_wait_cqe(&ring_io, &cqe);
     }
-    if (rc >= 0) {
+    if (rc >= 0 && cqe) {
         rc = cqe->res;
         io_uring_cqe_seen(&ring_io, cqe);
     }
@@ -95,7 +95,8 @@ static void ring_setup_buffers(void) {
     }
     if (!ring_bufs) {
         // Ubuntu 24.04's 6.8 kernels answer EINVAL to a provided-buffer ring, so classic buffers are the fallback.
-        fprintf(stderr, "provided-buffer ring unavailable (%s), using classic provided buffers\n", strerror(-err));
+        // A failed write to stderr is not actionable at startup.
+        (void)fprintf(stderr, "provided-buffer ring unavailable (%s), using classic provided buffers\n", strerror(-err));
         ring_provide_legacy();
         return;
     }
