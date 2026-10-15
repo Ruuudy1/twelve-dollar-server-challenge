@@ -16,7 +16,7 @@ struct child_result {
 };
 
 // Runs a server in a child process with the given descriptor limit; returns its pid and a pipe for its report.
-static pid_t spawn_server(int port, rlim_t nofile, bool force_enfile, int *report_fd) {
+static pid_t spawn_server(int port, rlim_t nofile, bool force_enfile, bool legacy, int *report_fd) {
     int p[2];
     char port_text[16];
     snprintf(port_text, sizeof port_text, "%d", port);
@@ -33,6 +33,7 @@ static pid_t spawn_server(int port, rlim_t nofile, bool force_enfile, int *repor
     struct rlimit rl = {nofile, nofile};
     setrlimit(RLIMIT_NOFILE, &rl);
     struct main_config cfg = {.sqlite_path = SERVER_DB, .jwt_secret = "secret", .host = "127.0.0.1", .port = port};
+    ring_force_legacy = legacy;
     main_startup(&cfg);
     if (force_enfile) {
         ring_direct_limit = 1000000;
@@ -92,9 +93,9 @@ static bool health_ok(int fd, bool half_close) {
 }
 
 // Opens n connections to a child server, checks each answers, then stops the child and returns its report.
-static struct child_result run_scenario(int port, rlim_t nofile, bool force_enfile, int n, int *ok_count) {
+static struct child_result run_scenario(int port, rlim_t nofile, unsigned mode, int n, int *ok_count) {
     int report_fd;
-    pid_t pid = spawn_server(port, nofile, force_enfile, &report_fd);
+    pid_t pid = spawn_server(port, nofile, mode & 1, mode & 2, &report_fd);
     static int fds[2000];
     struct child_result r = {0};
     *ok_count = 0;
@@ -121,7 +122,7 @@ static struct child_result run_scenario(int port, rlim_t nofile, bool force_enfi
 
 static void test_normal_fd_phase(void) {
     int ok;
-    struct child_result r = run_scenario(3345, 700, false, 900, &ok);
+    struct child_result r = run_scenario(3345, 700, 0, 900, &ok);
     CHECK(ok == 900);
     CHECK(r.fd_phase);
     CHECK(r.direct_live <= 700 && r.direct_live >= 600);
@@ -129,9 +130,15 @@ static void test_normal_fd_phase(void) {
     CHECK(r.enfile == 0);
 }
 
+static void test_classic_buffers(void) {
+    int ok;
+    struct child_result r = run_scenario(3342, 700, 2, 900, &ok);
+    CHECK(ok == 900 && r.fd_phase && r.live >= 900);
+}
+
 static void test_enfile(void) {
     int ok;
-    struct child_result r = run_scenario(3346, 700, true, 720, &ok);
+    struct child_result r = run_scenario(3346, 700, 1, 720, &ok);
     CHECK(ok >= 718);
     CHECK(r.enfile >= 1 && r.fd_phase);
     CHECK(r.direct_live <= 700 && r.live > r.direct_live);
@@ -266,6 +273,7 @@ int main(void) {
     tu_make_db(SERVER_DB);
     test_normal_fd_phase();
     test_enfile();
+    test_classic_buffers();
     tu_boot(3347, "/tmp/unit_ring.db");
     test_stale_generations();
     test_recv_results();

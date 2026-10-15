@@ -19,6 +19,9 @@ static struct io_uring ring_io;
 static struct io_uring_buf_ring *ring_bufs;
 static uint8_t *ring_buf_mem;
 static unsigned ring_buf_pending;
+static bool ring_buf_legacy;
+static bool ring_force_legacy;
+static uint16_t ring_buf_ids[PROV_BUF_COUNT];
 static int ring_listen_fd = -1;
 static unsigned ring_accept_state = RING_ACCEPT_OFF;
 static uint64_t ring_accept_tag;
@@ -58,19 +61,44 @@ static struct io_uring_sqe *ring_sqe(void) {
     return sqe;
 }
 
-// Maps and touches the provided-buffer memory and hands every buffer to the kernel.
-static void ring_setup_buffers(void) {
-    int err = 0;
-    size_t total = (size_t)PROV_BUF_COUNT * PROV_BUF_SIZE;
-    ring_bufs = io_uring_setup_buf_ring(&ring_io, PROV_BUF_COUNT, PROV_BUF_GROUP, 0, &err);
-    if (!ring_bufs) {
-        util_die("provided buffer ring failed: %s", strerror(-err));
+// Hands every buffer to the kernel as classic provided buffers, for kernels that refuse a provided-buffer ring.
+static void ring_provide_legacy(void) {
+    struct io_uring_cqe *cqe;
+    struct io_uring_sqe *sqe = ring_sqe();
+    io_uring_prep_provide_buffers(sqe, ring_buf_mem, PROV_BUF_SIZE, PROV_BUF_COUNT, PROV_BUF_GROUP, 0);
+    io_uring_sqe_set_data64(sqe, ring_tag(RING_OP_IGNORE, 0, 0));
+    int rc = io_uring_submit_and_wait(&ring_io, 1);
+    if (rc >= 0) {
+        rc = io_uring_wait_cqe(&ring_io, &cqe);
     }
+    if (rc >= 0) {
+        rc = cqe->res;
+        io_uring_cqe_seen(&ring_io, cqe);
+    }
+    if (rc < 0) {
+        util_die("provided buffers failed: %s", strerror(-rc));
+    }
+    ring_buf_legacy = true;
+}
+
+// Maps and touches the receive memory and hands every buffer to the kernel, by ring where the kernel allows it.
+static void ring_setup_buffers(void) {
+    int err = -EINVAL;
+    size_t total = (size_t)PROV_BUF_COUNT * PROV_BUF_SIZE;
     ring_buf_mem = pool_map(total);
     if (!ring_buf_mem) {
         util_die("cannot map receive buffers");
     }
     pool_touch(ring_buf_mem, total);
+    if (!ring_force_legacy) {
+        ring_bufs = io_uring_setup_buf_ring(&ring_io, PROV_BUF_COUNT, PROV_BUF_GROUP, 0, &err);
+    }
+    if (!ring_bufs) {
+        // Ubuntu 24.04's 6.8 kernels answer EINVAL to a provided-buffer ring, so classic buffers are the fallback.
+        fprintf(stderr, "provided-buffer ring unavailable (%s), using classic provided buffers\n", strerror(-err));
+        ring_provide_legacy();
+        return;
+    }
     for (unsigned i = 0; i < PROV_BUF_COUNT; i++) {
         io_uring_buf_ring_add(ring_bufs, ring_buf_mem + (size_t)i * PROV_BUF_SIZE, PROV_BUF_SIZE, (unsigned short)i,
                               io_uring_buf_ring_mask(PROV_BUF_COUNT), (int)i);
@@ -123,17 +151,44 @@ static void ring_init(int listen_fd) {
 
 // Hands a receive buffer back to the kernel; it becomes visible at the next ring_buf_commit.
 static void ring_buf_return(int buf_id) {
-    io_uring_buf_ring_add(ring_bufs, ring_buf_mem + (size_t)buf_id * PROV_BUF_SIZE, PROV_BUF_SIZE,
-                          (unsigned short)buf_id, io_uring_buf_ring_mask(PROV_BUF_COUNT), (int)ring_buf_pending);
+    if (ring_buf_legacy) {
+        ring_buf_ids[ring_buf_pending] = (uint16_t)buf_id;
+    } else {
+        io_uring_buf_ring_add(ring_bufs, ring_buf_mem + (size_t)buf_id * PROV_BUF_SIZE, PROV_BUF_SIZE,
+                              (unsigned short)buf_id, io_uring_buf_ring_mask(PROV_BUF_COUNT), (int)ring_buf_pending);
+    }
     ring_buf_pending++;
 }
 
-// Publishes every buffer returned since the last commit with one tail update.
-static void ring_buf_commit(void) {
-    if (ring_buf_pending) {
-        io_uring_buf_ring_advance(ring_bufs, (int)ring_buf_pending);
-        ring_buf_pending = 0;
+// Provides the returned classic buffers again, one SQE per run of consecutive buffer ids.
+static void ring_buf_commit_legacy(void) {
+    unsigned i = 0;
+    while (i < ring_buf_pending) {
+        unsigned first = ring_buf_ids[i];
+        unsigned run = 1;
+        while (i + run < ring_buf_pending && ring_buf_ids[i + run] == first + run) {
+            run++;
+        }
+        struct io_uring_sqe *sqe = ring_sqe();
+        io_uring_prep_provide_buffers(sqe, ring_buf_mem + (size_t)first * PROV_BUF_SIZE, PROV_BUF_SIZE, (int)run,
+                                      PROV_BUF_GROUP, (int)first);
+        io_uring_sqe_set_data64(sqe, ring_tag(RING_OP_IGNORE, 0, 0));
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+        i += run;
     }
+}
+
+// Publishes every buffer returned since the last commit with one tail update, or one SQE per run of classic buffers.
+static void ring_buf_commit(void) {
+    if (!ring_buf_pending) {
+        return;
+    }
+    if (ring_buf_legacy) {
+        ring_buf_commit_legacy();
+    } else {
+        io_uring_buf_ring_advance(ring_bufs, (int)ring_buf_pending);
+    }
+    ring_buf_pending = 0;
 }
 
 // Arms a multishot accept: direct descriptors, or normal fds once the direct table is nearly full.
