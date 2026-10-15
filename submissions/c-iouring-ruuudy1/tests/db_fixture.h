@@ -97,6 +97,7 @@ static void fx_execf(sqlite3 *db, const char *fmt, ...) {
 static void fx_init(void) {
     static bool done;
     if (!done) {
+        db_mem_config();
         db_pagecache_config();
         CHECK(sqlite3_initialize() == SQLITE_OK);
         done = true;
