@@ -1,8 +1,5 @@
 // Owner: http module. Request framing and header parsing over a byte range.
 
-#ifndef __SSE2__
-#error "http.c needs SSE2"
-#endif
 #include <emmintrin.h>
 
 enum http_method {
@@ -89,28 +86,28 @@ static enum http_scan http_scan_head(const char *buf, uint32_t n, struct http_he
     uint32_t prev_lf = 0;
     for (uint32_t base = 0; base < n; base += 16) {
         uint32_t rem = n - base;
-        uint32_t valid = rem >= 16 ? 0xFFFFu : (1u << rem) - 1u;
+        uint32_t valid = rem >= 16 ? 0xFFFFU : (1U << rem) - 1U;
         struct http_masks m = http_block_masks(http_load16(buf + base, rem));
         uint32_t lf = m.lf & valid;
         uint32_t wl = prev_lf | (lf << 16);
-        uint32_t term = wl & (wl >> 2) & 0x3FFFC000u;
-        uint32_t last = term ? (uint32_t)__builtin_ctz(term) - 14u : 0;
+        uint32_t term = wl & (wl >> 2) & 0x3FFFC000U;
+        uint32_t last = term ? (uint32_t)__builtin_ctz(term) - 14U : 0;
         if (term) {
-            valid &= (2u << last) - 1u;
+            valid &= (2U << last) - 1U;
             lf &= valid;
         }
         uint32_t cr = m.cr & valid;
         if (UNLIKELY(lf != (((cr << 1) | (prev_cr >> 15)) & valid) || (m.bad & valid))) {
             return HTTP_SCAN_BAD;
         }
-        for (uint32_t bits = cr; bits; bits &= bits - 1u) {
+        for (uint32_t bits = cr; bits; bits &= bits - 1U) {
             if (UNLIKELY(h->cr_n == HTTP_CR_MAX)) {
                 return HTTP_SCAN_BAD;
             }
             h->eol[h->cr_n++] = (uint16_t)(base + (uint32_t)__builtin_ctz(bits));
         }
         if (term) {
-            h->end = base + last + 1u;
+            h->end = base + last + 1U;
             return HTTP_SCAN_FOUND;
         }
         prev_cr = cr;
@@ -142,7 +139,7 @@ static bool http_ieq(struct slice s, const char *lower, uint32_t n) {
         return false;
     }
     for (uint32_t i = 0; i < n; i++) {
-        if (((unsigned char)s.p[i] | 0x20u) != (unsigned char)lower[i]) {
+        if (((unsigned char)s.p[i] | 0x20U) != (unsigned char)lower[i]) {
             return false;
         }
     }
@@ -242,11 +239,11 @@ static bool http_header(const char *line, uint32_t n, struct request *req, struc
 // Parses "METHOD SP target SP HTTP/1.x" from buf[0, n); the query string is dropped from the path.
 static bool http_request_line(const char *buf, uint32_t n, struct request *req, struct http_hdrs *hd) {
     const char *sp = memchr(buf, ' ', n);
-    if (!sp || sp == buf) {
+    if (!sp || sp == buf || memchr(buf, '\t', n)) {
         return false;
     }
     uint32_t mn = (uint32_t)(sp - buf);
-    if (n < mn + 1 + 1 + 1 + 8 || buf[n - 9] != ' ' || memcmp(buf + n - 8, "HTTP/1.", 7) ||
+    if (n < mn + 1 + 1 + 1 + 8 || buf[n - 9] != ' ' || memcmp(buf + n - 8, "HTTP/1.", 7) != 0 ||
         (buf[n - 1] != '0' && buf[n - 1] != '1')) {
         return false;
     }
@@ -313,7 +310,7 @@ static uint32_t http_hex_value(char c) {
     if (u - (uint32_t)'0' < 10) {
         return u - (uint32_t)'0';
     }
-    u |= 0x20u;
+    u |= 0x20U;
     return u - (uint32_t)'a' < 6 ? u - (uint32_t)'a' + 10 : 16;
 }
 
@@ -439,8 +436,8 @@ static enum http_parse_status http_chunked(char *buf, uint32_t len, uint32_t sta
 }
 
 // Finishes a request whose body is framed by Content-Length (or has none).
-static enum http_parse_status http_body_plain(char *buf, uint32_t len, struct request *req, const struct http_hdrs *hd,
-                                              uint32_t end) {
+static enum http_parse_status http_body_plain(const char *buf, uint32_t len, struct request *req,
+                                              const struct http_hdrs *hd, uint32_t end) {
     uint32_t cl = hd->has_cl ? hd->cl : 0;
     if (cl > REQUEST_MAX - end) {
         return http_reject(req, len);
@@ -475,14 +472,14 @@ static enum http_parse_status http_body_chunked(char *buf, uint32_t len, struct 
 static enum http_parse_status http_parse(char *buf, uint32_t len, struct request *req) {
     struct http_head head = {{0}, 0, 0};
     struct http_hdrs hd = {0};
-    uint32_t limit = len < HEADER_MAX + 4u ? len : HEADER_MAX + 4u;
+    uint32_t limit = len < HEADER_MAX + 4U ? len : HEADER_MAX + 4U;
     *req = (struct request){0};
     enum http_scan scan = http_scan_head(buf, limit, &head);
     if (UNLIKELY(scan == HTTP_SCAN_BAD)) {
         return http_reject(req, len);
     }
     if (scan == HTTP_SCAN_MORE) {
-        return len >= HEADER_MAX + 4u ? http_reject(req, len) : http_wait(req, false);
+        return len >= HEADER_MAX + 4U ? http_reject(req, len) : http_wait(req, false);
     }
     if (UNLIKELY(!http_parse_lines(buf, &head, req, &hd))) {
         return http_reject(req, len);
