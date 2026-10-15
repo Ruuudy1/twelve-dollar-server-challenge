@@ -203,6 +203,7 @@ static void main_pass(void) {
 // Loops passes until a stop signal arrives, then commits whatever is open.
 static void main_loop(bool stats_on) {
     struct main_timers timers = {0};
+    timers.stats_ns = util_mono_ns() + STATS_INTERVAL_S * 1000000000ULL;
     while (!stop_flag) {
         main_pass();
         main_timers_run(&timers, stats_on);
