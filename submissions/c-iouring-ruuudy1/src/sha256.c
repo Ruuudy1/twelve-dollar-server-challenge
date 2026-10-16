@@ -75,8 +75,14 @@ static void sha256_blocks_scalar(uint32_t st[SHA256_STATE_WORDS], const uint8_t 
     for (; nblocks; nblocks--, p += SHA256_BLOCK) {
         uint32_t w[SHA256_ROUNDS] = {0};
         sha256_schedule(w, p);
-        uint32_t a = st[0], b = st[1], c = st[2], d = st[3];
-        uint32_t e = st[4], f = st[5], g = st[6], h = st[7];
+        uint32_t a = st[0];
+        uint32_t b = st[1];
+        uint32_t c = st[2];
+        uint32_t d = st[3];
+        uint32_t e = st[4];
+        uint32_t f = st[5];
+        uint32_t g = st[6];
+        uint32_t h = st[7];
         for (unsigned i = 0; i < SHA256_ROUNDS; i++) {
             uint32_t s1 = sha256_ror(e, 6) ^ sha256_ror(e, 11) ^ sha256_ror(e, 25);
             uint32_t t1 = h + s1 + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i];

@@ -30,7 +30,7 @@ fuzz: $(FUZZ_SRCS:%.c=$(OUT)/fuzz/%.run)
 clean:
 	rm -rf $(OUT)
 
-$(OUT)/sqlite3.o: $(ROOT)/deps/sqlite/sqlite3.c
+$(OUT)/sqlite3.o: $(ROOT)/deps/sqlite/sqlite3.c $(ROOT)/build.sh
 	@mkdir -p $(OUT)
 	$(CC) -O2 -w $(SQLITE_DEFS) -isystem $(ROOT)/deps/sqlite -c $< -o $@
 

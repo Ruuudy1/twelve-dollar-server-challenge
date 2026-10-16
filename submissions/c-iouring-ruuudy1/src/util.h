@@ -81,17 +81,19 @@ static void util_log_limited(unsigned kind, const char *fmt, ...) {
     last_ns[kind] = now;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    // A failed write to stderr is not actionable here.
+    (void)vfprintf(stderr, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    (void)fputc('\n', stderr);
 }
 
 // Prints a startup failure and exits; never called once the loop is running.
 static void util_die(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    // A failed write to stderr is not actionable here.
+    (void)vfprintf(stderr, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    (void)fputc('\n', stderr);
     exit(1);
 }
