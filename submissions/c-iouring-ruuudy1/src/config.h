@@ -84,6 +84,10 @@
 #define FEED_LIMIT 20
 #define FEED_SPAN_MAX 128
 
+// JWT limits (crypto module): longest header or payload segment, and the signature segment length (32 bytes, unpadded).
+#define JWT_SEGMENT_MAX 8192
+#define JWT_SIG_CHARS 43
+
 // Stats line period in seconds when --stats is given.
 #define STATS_INTERVAL_S 10
 
@@ -92,3 +96,12 @@
 #define HTTP_HEADER_COUNT_MAX 100
 // Most CR bytes the head scan records: one per line plus the blank line.
 #define HTTP_CR_MAX (HTTP_HEADER_COUNT_MAX + 2)
+
+// Database module: page cache region for SQLite, sized for DB_CACHE_SIZE (keep the two in step).
+#define DB_PAGE_BYTES 4096
+#define DB_PAGECACHE_KIB 131072
+// Slots beyond the cache_size page count, for pages SQLite holds outside the cache limit.
+#define DB_PAGECACHE_SLACK 64
+// Heap for SQLite own allocations (memsys5): high-water measured in the tests is under 0.2 MB, so 8 MB is a wide margin.
+#define DB_HEAP_MB 8
+#define DB_HEAP_MIN_ALLOC 32
