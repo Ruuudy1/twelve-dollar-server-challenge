@@ -738,7 +738,7 @@ static uint32_t json_count_chars(struct slice s) {
 }
 
 // Parses a create body, unescapes and trims its "body" string into scratch, and applies the length rules.
-static NOT_YET_USED enum json_body_status json_create_body(struct slice doc, char *scratch, uint32_t cap,
+static enum json_body_status json_create_body(struct slice doc, char *scratch, uint32_t cap,
                                                            struct slice *out) {
     struct json_field body = {.key = "body"};
     out->p = scratch;

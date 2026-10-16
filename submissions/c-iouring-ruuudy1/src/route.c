@@ -86,7 +86,7 @@ static void route_classify(const struct request *req, struct route *r) {
 }
 
 // Parses an id: ASCII digits only, nonzero, at most int64 range.
-static NOT_YET_USED enum route_id_status route_parse_id(struct slice s, int64_t *out) {
+static enum route_id_status route_parse_id(struct slice s, int64_t *out) {
     uint64_t v = 0;
     bool nonzero = false;
     bool overflow = false;

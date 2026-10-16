@@ -237,7 +237,7 @@ static enum auth_status auth_check_payload(struct slice payload, int64_t now_s, 
 }
 
 // Checks an Authorization header value in the order the spec fixes: scheme, shape, algorithm, signature, exp, payload.
-static NOT_YET_USED enum auth_status auth_check(struct slice header, int64_t now_s, char *scratch, uint32_t cap,
+static enum auth_status auth_check(struct slice header, int64_t now_s, char *scratch, uint32_t cap,
                                                 struct auth_identity *id) {
     bool has_scheme = header.n >= LIT_LEN(AUTH_SCHEME) && !memcmp(header.p, AUTH_SCHEME, LIT_LEN(AUTH_SCHEME));
     if (!has_scheme) {

@@ -313,7 +313,7 @@ static char *resp_need(struct resp *r, uint32_t n) {
 }
 
 // Appends raw bytes to the body; returns false when no room can be found.
-static NOT_YET_USED bool resp_put(struct resp *r, const char *s, uint32_t n) {
+static bool resp_put(struct resp *r, const char *s, uint32_t n) {
     char *o = resp_need(r, n);
     if (UNLIKELY(!o)) {
         return false;
