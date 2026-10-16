@@ -105,3 +105,20 @@
 // Heap for SQLite own allocations (memsys5): high-water measured in the tests is under 0.2 MB, so 8 MB is a wide margin.
 #define DB_HEAP_MB 8
 #define DB_HEAP_MIN_ALLOC 32
+
+// io module: loop, accept, watch list and shedding knobs.
+// Skip the wait when the previous pass stopped at K requests or PASS_CQE_MAX completions with work still queued.
+#define PASS_WAIT_SKIP_BACKLOG 1
+// Use the 6.12 min-wait timeout when the kernel offers it; zero keeps the 6.8 wait on every kernel.
+#define RING_USE_MIN_WAIT 0
+// Minimum wait in microseconds handed to the kernel when RING_USE_MIN_WAIT is set.
+#define RING_MIN_WAIT_US 200
+// Consecutive accept errors that trigger the backoff, and how long accept then stays off.
+#define ACCEPT_ERR_BURST 3
+#define ACCEPT_BACKOFF_NS 10000000LL
+// Attempts to free a submission slot before an operation is dropped.
+#define RING_SQE_RETRIES 8
+// Alignment of every pool mapping, so MADV_HUGEPAGE can back it with 2 MB pages.
+#define POOL_ALIGN (2u * 1024u * 1024u)
+// Age buckets (in seconds) of the idle-shedding histogram; older connections share the last bucket.
+#define SHED_AGE_BUCKETS 1024
